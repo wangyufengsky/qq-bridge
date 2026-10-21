@@ -21,7 +21,7 @@ import { SENSITIVE_RE } from './sensitive.js';
 import { serializeModelData } from './qq-model-view.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const ROOT = path.resolve(__dirname, '..');
+const ROOT = process.env.QQ_BRIDGE_INSTANCE_DIR ? path.resolve(process.env.QQ_BRIDGE_INSTANCE_DIR) : path.resolve(__dirname, '..');
 
 function loadConfig() {
   try {
@@ -316,6 +316,7 @@ const TOOL_CONFIG_FLAGS = {
   qq_set_wake_config: 'setWakeConfig',
   qq_send_burst: 'sendBurst',
   qq_send_message: 'sendMessage',
+  qq_send_generated_image: 'sendGeneratedImage',
   qq_wait_for_messages: 'waitMessages',
   qq_report_feedback: 'feedback',
   qq_get_my_recent_messages: 'getMyRecent',
@@ -531,6 +532,19 @@ server.tool(
 );
 
 // ── 二代仿真模式（reserved2）工具 ─────────────────────────────────────────
+// Generated assets are scoped to the backend thread by the bridge, never arbitrary host files.
+if (cfg.backend === 'codex') server.tool(
+  'qq_send_generated_image',
+  '把当前会话通过生图工具生成的 PNG/JPEG/WebP 图片发到当前 QQ 会话。filePath 使用生图返回的本地路径或文件名；必须是当前会话的生成产物。不能发送任意本地文件、URL或其他会话图片。最大10MB。生图展示不会自动发到QQ，生成后调用此工具。成功返回messageId才表示QQ网关已接受；重复请求不会重复发送。IMAGE_RECEIPT_UNKNOWN/IMAGE_DELIVERY_UNCONFIRMED表示回执未确认，交给管理员核对，不自动重试。',
+  {key:z.string(), token:z.string(), filePath:z.string().min(1)},
+  async ({key,token,filePath}) => {
+    try {
+      const data=await agentApi('/api/socialV2/send-generated-image',{method:'POST',timeoutMs:120000,headers:{'x-agent-token':token},body:JSON.stringify({key,filePath})});
+      return {content:[{type:'text',text:serializeModelData(data)}]};
+    } catch(error) {return {isError:true,content:[{type:'text',text:`图片发送失败：${error?.message ?? error}`} ]};}
+  }
+);
+
 server.tool(
   'qq_get_prompt',
   '查看当前二代仿真模式的提示词/角色/推荐值/可用工具/当前唤醒配置（只读）。',

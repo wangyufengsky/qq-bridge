@@ -1,0 +1,28 @@
+{
+  "port": 3110,
+  "banter": {"maxMessages": 6, "cooldownMs": 60000},
+  "bots": [
+    {
+      "id": "deepseek",
+      "name": "大肥鱼",
+      "backend": "dsh",
+      "external": true,
+      "instanceDir": "instances/deepseek",
+      "consolePort": 3100,
+      "accountId": "",
+      "snowluma": {"httpUrl": "http://127.0.0.1:3000", "wsUrl": "ws://127.0.0.1:3001", "accessToken": ""},
+      "allow": {"groups": [], "private": []}
+    },
+    {
+      "id": "codex",
+      "name": "Codex 伙伴",
+      "backend": "codex",
+      "instanceDir": "instances/codex",
+      "consolePort": 3112,
+      "accountId": "",
+      "snowluma": {"httpUrl": "http://127.0.0.1:3010", "wsUrl": "ws://127.0.0.1:3011", "accessToken": ""},
+      "codex": {"command": "codex", "effort": "medium", "socialReaderEntry": "packages/social-reader/src/server.mjs"},
+      "allow": {"groups": [], "private": []}
+    }
+  ]
+}

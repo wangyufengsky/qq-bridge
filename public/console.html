@@ -1833,7 +1833,7 @@ button:active:not(:disabled) {
           <li><b>仿真提示词</b>（预设内置）：AI 怎么调工具、怎么参与群聊 —— <i>行为与协议</i>。</li>
           <li><b>人格提示词</b>（本页编辑）：AI 是谁、什么性格、怎么说话 —— <i>人设与语气</i>。</li>
         </ol>
-        <p>每条消息发给 AI 时，按 <code>仿真提示词 → 人格提示词 → 本轮消息</code> 的顺序拼装。人格层保存即生效；仿真层需重启 DSH。</p>
+        <p>每条消息发给 AI 时，按 <code>仿真提示词 → 人格提示词 → 本轮消息</code> 的顺序拼装。人格层保存即生效；仿真层生效方式见下方说明。</p>
       </div>
 
       <h3>人格列表 <span class="meta" id="roleListHint"></span></h3>
@@ -2899,6 +2899,7 @@ async function refreshRoles() {
   }
 }
 
+let simPromptBackend = 'dsh';
 // ── 仿真提示词（预设内置，需重启 DSH 生效）──────────────────────────────────
 let simPromptOriginal = '';
 let simPromptPreset = 'qq-chat-v2';
@@ -2935,11 +2936,13 @@ async function refreshSimPrompt() {
     setSimEditing(false);
     setSimMsg('');
     const status = r.status || {};
+    simPromptBackend = status.backend || 'dsh';
+    document.getElementById('simPromptSave').textContent = simPromptBackend === 'codex' ? '保存到当前实例' : '保存并同步到 DSH';
     document.getElementById('simPromptStatus').textContent =
-      `${status.label || simPromptPreset} · ${r.chars} 字符${status.installed ? ' · 已同步到 DSH' : ' · 尚未同步到 DSH'}`;
+      `${status.label || simPromptPreset} · ${r.chars} 字符${simPromptBackend === 'codex' ? ' · 当前 Codex 实例' : status.installed ? ' · 已同步到 DSH' : ' · 尚未同步到 DSH'}`;
     document.getElementById('simPromptWarnings').textContent = (r.warnings || []).length
       ? '⚠️ ' + r.warnings.join('；') : '';
-    document.getElementById('simPromptRestart').textContent =
+    document.getElementById('simPromptRestart').textContent = simPromptBackend === 'codex' ? '保存到当前 Codex 实例，新建或重置会话后使用新版提示词。' :
       '改动写入该代预设的源文件并同步到 DSH 的 preset 目录；preset 由 DSH 在会话创建时装配，因此新会话会自动用新版，正在进行的 QQ 会话需重置该会话或重启 DSH。';
   } catch (error) {
     setSimMsg('读取失败：' + (error?.message ?? error), false);
@@ -3106,7 +3109,7 @@ document.getElementById('simPromptCancel').addEventListener('click', () => {
 document.getElementById('simPromptPreset').addEventListener('change', () => { refreshSimPrompt(); });
 document.getElementById('simPromptSave').addEventListener('click', async () => {
   const content = document.getElementById('simPromptText').value;
-  if (!confirm('保存会改写该代预设的源文件并同步到 DSH 的 preset 目录（新会话生效，进行中的会话需重置或重启 DSH）。确定继续？')) return;
+  if (!confirm(simPromptBackend === 'codex' ? '保存到当前 Codex 实例，新建或重置会话后生效。确定继续？' : '保存会改写该代预设的源文件并同步到 DSH 的 preset 目录（新会话生效，进行中的会话需重置或重启 DSH）。确定继续？')) return;
   setSimMsg('保存中…');
   const r = await api('/api/preset/sim-prompt', 'POST', { preset: simPromptPreset, content });
   if (!r.ok) { setSimMsg('❌ ' + (r.error || '保存失败'), false); return; }
@@ -3118,15 +3121,15 @@ document.getElementById('simPromptSave').addEventListener('click', async () => {
   }
   simPromptOriginal = content;
   setSimEditing(false);
-  setSimMsg(`✅ 已保存${r.synced ? '并同步到 DSH' : ''}；重启 DSH 后生效`, true);
+  setSimMsg(simPromptBackend === 'codex' ? '✅ 已保存；新建或重置会话后生效' : `✅ 已保存${r.synced ? '并同步到 DSH' : ''}；重启 DSH 后生效`, true);
   document.getElementById('simPromptWarnings').textContent = (r.warnings || []).length ? '⚠️ ' + r.warnings.join('；') : '';
-  document.getElementById('simPromptStatus').textContent = `${r.status?.label || simPromptPreset} · ${content.length} 字符 · 已保存，待重启 DSH`;
+  document.getElementById('simPromptStatus').textContent = `${r.status?.label || simPromptPreset} · ${content.length} 字符 · 已保存，${simPromptBackend === 'codex' ? '待重置会话' : '待重启 DSH'}`;
 });
 document.getElementById('simPromptRestore').addEventListener('click', async () => {
   if (!confirm('还原到该代预设上一次保存前的备份？当前改动会丢失（原文件会先自动备份）。')) return;
   const r = await api('/api/preset/sim-prompt/restore', 'POST', { preset: simPromptPreset });
   if (!r.ok) { setSimMsg('❌ ' + (r.error || '还原失败'), false); return; }
-  setSimMsg(`✅ 已还原（${r.restoredFrom}）；重启 DSH 后生效`, true);
+  setSimMsg(`✅ 已还原（${r.restoredFrom}）；${simPromptBackend === 'codex' ? '重置会话后生效' : '重启 DSH 后生效'}`, true);
   refreshSimPrompt();
 });
 
@@ -4480,12 +4483,14 @@ document.querySelector('.skip-link').addEventListener('click', event => {
   document.getElementById('mainContent').scrollIntoView({ block: 'start', behavior: 'instant' });
 });
 function updateOverview(status, modeLabel) {
+  const engine = status.backend === 'codex' ? 'Codex' : 'DSH';
+  document.querySelector('.brand small').textContent = engine + ' 控制台';
   const connection = document.getElementById('statusText');
-  connection.textContent = status.dshReady ? 'DSH 已连接' : 'DSH 未连接';
+  connection.textContent = engine + (status.dshReady ? ' 已连接' : ' 未连接');
   connection.className = 'status-badge ' + (status.dshReady ? 'online' : 'offline');
   document.getElementById('metricDsh').textContent = status.dshReady ? '已连接' : '未连接';
   document.getElementById('metricDsh').className = status.dshReady ? 'ok' : 'err';
-  document.getElementById('metricDshHint').textContent = status.dshReady ? '桥接状态已同步' : '请检查 DSH 是否运行';
+  document.getElementById('metricDshHint').textContent = status.dshReady ? '桥接状态已同步' : '请检查 ' + engine + ' 是否运行或已登录';
   renderSnowlumaHealth(status.snowluma);
   document.getElementById('metricMode').textContent = modeLabel.replace('模式', '');
   document.getElementById('metricRole').textContent = '角色 · ' + (status.role || '默认人格');

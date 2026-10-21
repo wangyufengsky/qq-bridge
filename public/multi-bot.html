@@ -1,0 +1,29 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>QQ Bridge · 双 AI 管理台</title>
+<style>
+body{margin:0;background:#111521;color:#e9edf8;font:15px system-ui}main{max-width:1100px;margin:50px auto;padding:0 24px}
+h1{font-size:30px}p{color:#aeb9d1}button,input{border:1px solid #435075;border-radius:8px;background:#202a43;color:inherit;padding:10px 14px;margin:4px}
+button{cursor:pointer}button:disabled{opacity:.4;cursor:default}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:20px;margin:25px 0}
+article{border:1px solid #35415e;border-radius:16px;padding:22px;background:#192033}small{color:#aeb9d1}#error{color:#ffbdab;white-space:pre-wrap}
+a{color:#a8bbff}#details{padding:18px;border:1px solid #435075;border-radius:12px}input{width:330px}header{display:flex;align-items:center;justify-content:space-between;gap:20px;flex-wrap:wrap}
+</style><main><header><div><small>QQ BRIDGE / MULTI AI</small><h1>两个伙伴，一个管理台</h1><p>账号独立 · 第二只按需启动 · 允许互相拌嘴</p></div><div><button id="pause">全部暂停</button><button id="resume">解除全局暂停</button></div></header>
+<div id="login"><input id="token" type="password" placeholder="输入本机管理令牌"><button id="connect">连接</button></div>
+<p id="error"></p><section class="cards" id="bots"></section><section id="details" hidden><h2 id="selected"></h2><p>在独立页面打开该账号的设置；管理台继续保持在线。</p><a id="console" target="_blank" rel="noopener noreferrer">打开设置页面 ↗</a></section></main>
+<script>
+let token=sessionStorage.getItem('qq-manager-token')||'';
+const error=document.querySelector('#error');
+async function api(url,body){const r=await fetch(url,{method:body?'POST':'GET',headers:{'x-manager-token':token,'content-type':'application/json'},...(body?{body:JSON.stringify(body)}:{})});const data=await r.json();if(!r.ok)throw Error(data.error||'请求失败');return data;}
+async function refresh(){try{const data=await api('/api/bots');document.querySelector('#login').hidden=true;const root=document.querySelector('#bots');root.replaceChildren();
+for(const b of data.bots){const card=document.createElement('article'),title=document.createElement('h2'),state=document.createElement('p'),desc=document.createElement('p');
+title.textContent=b.name+' · '+(b.backend==='codex'?'Codex':'DeepSeek / DSH');
+state.textContent=!b.running?(b.external?'未连接现有实例':'已停止'):!b.status?'正在连接':b.status.paused?'发言已暂停':b.status.online&&b.status.ready?'在线':'等待 QQ 或模型连接';
+desc.textContent=b.error||(!b.configured?'待配置 QQ 账号和登录信息':b.status?.role?'人格：'+b.status.role:'独立保存人格和记忆');
+card.append(title,state,desc);
+for(const [action,label] of [['start','启动'],['stop','停止'],['pause','暂停发言'],['resume','恢复发言'],['console','设置']]){
+const btn=document.createElement('button');btn.textContent=label;btn.disabled=(b.external&&['start','stop'].includes(action))||(action==='start'?(b.running||!b.configured):!b.running);
+btn.onclick=async()=>{btn.disabled=true;error.textContent='';try{const result=await api('/api/bots/'+b.id+'/'+action,{});if(result.url){document.querySelector('#details').hidden=false;document.querySelector('#selected').textContent=b.name;document.querySelector('#console').href=result.url;}await refresh();}catch(e){error.textContent=e.message;btn.disabled=false;}};card.append(btn);}
+root.append(card);}}catch(e){error.textContent=e.message;document.querySelector('#login').hidden=false;}}
+document.querySelector('#connect').onclick=()=>{token=document.querySelector('#token').value;sessionStorage.setItem('qq-manager-token',token);refresh();};
+for(const [id,paused] of [['pause',true],['resume',false]])document.querySelector('#'+id).onclick=async()=>{try{const r=await api('/api/pause-all',{paused});if(!r.ok)error.textContent='部分实例未返回暂停确认，请检查状态';await refresh();}catch(e){error.textContent=e.message;}};
+if(token)refresh();setInterval(()=>{if(token)refresh();},5000);
+</script></html>

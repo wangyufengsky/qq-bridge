@@ -1,0 +1,55 @@
+# Optional QQ gateway deployment. Do not recreate the currently running container.
+# Mounts and internal ports match the inspected v1.14.20 container.
+name: qq-bridge-dual
+services:
+  qq-deepseek:
+    image: motricseven7/snowluma:v1.14.20
+    profiles: [deepseek]
+    restart: "no"
+    # The image marks Node with cap_sys_ptrace=ep for the QQ hook.
+    cap_add: [SYS_PTRACE]
+    environment:
+      SNOWLUMA_WEBUI_HOST: 0.0.0.0
+      SNOWLUMA_WEBUI_PORT: "5099"
+      SNOWLUMA_QQ_FLAGS: --disable-gpu --disable-software-rasterizer --disable-gpu-compositing
+    ports:
+      - "127.0.0.1:3300:3000"
+      - "127.0.0.1:3301:3001"
+      - "127.0.0.1:6901:6081"
+      - "127.0.0.1:5199:5099"
+    volumes:
+      - deepseek-data:/app/.config
+      - deepseek-share:/app/.local/share
+      - deepseek-gateway:/app/data
+    mem_limit: ${QQ_MEMORY_LIMIT:-2g}
+    cpus: ${QQ_CPU_LIMIT:-2}
+    shm_size: 1g
+  qq-codex:
+    image: motricseven7/snowluma:v1.14.20
+    profiles: [codex]
+    restart: "no"
+    # The image marks Node with cap_sys_ptrace=ep for the QQ hook.
+    cap_add: [SYS_PTRACE]
+    environment:
+      SNOWLUMA_WEBUI_HOST: 0.0.0.0
+      SNOWLUMA_WEBUI_PORT: "5099"
+      SNOWLUMA_QQ_FLAGS: --disable-gpu --disable-software-rasterizer --disable-gpu-compositing
+    ports:
+      - "127.0.0.1:3010:3000"
+      - "127.0.0.1:3011:3001"
+      - "127.0.0.1:6902:6081"
+      - "127.0.0.1:5299:5099"
+    volumes:
+      - codex-data:/app/.config
+      - codex-share:/app/.local/share
+      - codex-gateway:/app/data
+    mem_limit: ${QQ_MEMORY_LIMIT:-2g}
+    cpus: ${QQ_CPU_LIMIT:-2}
+    shm_size: 1g
+volumes:
+  deepseek-data:
+  deepseek-share:
+  deepseek-gateway:
+  codex-data:
+  codex-share:
+  codex-gateway:

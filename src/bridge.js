@@ -16,6 +16,9 @@ import { extractPresetPrefix, presetPromptBlockers, presetPromptWarnings, render
 import { GEN1_ROLE_LINE_RE, parseRoleSections, roleCharStats, roleSectionReport, selectRoleText } from './role-card.js';
 import { fileURLToPath } from 'node:url';
 import { SnowLumaWebSocketClient, text } from '@snowluma/sdk';
+import { readGeneratedImage, deliverGeneratedImage } from './generated-image.mjs';
+import { CodexClient } from './backends/codex-client.mjs';
+import { runtimePresetPath, syncPresetCopy } from './backends/preset-storage.mjs';
 import { NodeApiClient, unwrap, createTurnCollector, discoverDshLaunchToken } from './dsh-client.js';
 import { mdToPlain, splitForQQ, truncateText, truncateTextTail } from './md-to-plain.js';
 import { SENSITIVE_RE } from './sensitive.js';
@@ -55,7 +58,8 @@ import {
 } from './sticker-lib.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const ROOT = path.resolve(__dirname, '..');
+const CODE_ROOT = path.resolve(__dirname, '..');
+const ROOT = process.env.QQ_BRIDGE_INSTANCE_DIR ? path.resolve(process.env.QQ_BRIDGE_INSTANCE_DIR) : CODE_ROOT;
 const STATE_DIR = path.join(ROOT, 'state');
 const STATE_FILE = path.join(STATE_DIR, 'sessions.json');
 const ROLE_STATE_FILE = path.join(STATE_DIR, 'current-role.json');
@@ -423,8 +427,13 @@ function dshHomeDir() {
   return process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
 }
 
+function presetStorageOptions(name) {
+  const config = readJsonSafe(path.join(ROOT, 'config.json'), {});
+  return { backend: config.backend, source: presetSourceYaml(name), dshHome: dshHomeDir(), name };
+}
+
 function installedPresetYaml(name) {
-  return path.join(dshHomeDir(), '.agent-presets', name, 'agent.cordis.yml');
+  return runtimePresetPath(presetStorageOptions(name));
 }
 
 // 这里**没有**模块级的 resolvePresetName —— 曾经有一个，但它被 main() 内部同名函数完全遮蔽
@@ -483,6 +492,7 @@ function presetStatus(name) {
     preset: name,
     label: name === PRESET_NAMES.v1 ? '一代仿真（reserved）' : '二代仿真（reserved2）',
     sourceFile: path.relative(ROOT, presetSourceYaml(name)),
+    backend: presetStorageOptions(name).backend || 'dsh',
     installed: fs.existsSync(installedPresetYaml(name)),
     requiresRestart: true,
   };
@@ -499,7 +509,7 @@ function isSilentMarker(text) {
 
 // DSH MCP 发送类工具：一旦 AI 在回合里调用过这些工具，说明消息已经由工具发出，
 // 桥接应跳过该回合的自动转发，避免“工具发一条 + 自动转发一条”的重复。
-const SEND_TOOL_RE = /^mcp__snowluma__qq_(send_group_message|send_private_message|reply|send_burst|send_message)$/;
+const SEND_TOOL_RE = /^mcp__snowluma__qq_(send_group_message|send_private_message|reply|send_burst|send_message|send_generated_image)$/;
 function isSendToolName(name) {
   return SEND_TOOL_RE.test(String(name ?? ''));
 }
@@ -572,10 +582,12 @@ let modelSelectionEpoch = 0;
 // 'off' 虽然合法（关闭思考），但 QQ 聊天助手依赖思考，控制台不提供该档。
 const REASONING_EFFORT_OPTIONS = ['low', 'high', 'max'];
 const REASONING_EFFORT_DEFAULT = 'max';
-function normalizeReasoningEffort(value) {
+const CODEX_EFFORT_OPTIONS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'];
+function normalizeReasoningEffort(value, backend = 'dsh') {
+  const options = backend === 'codex' ? CODEX_EFFORT_OPTIONS : REASONING_EFFORT_OPTIONS;
   const v = String(value ?? '').trim().toLowerCase();
-  if (!REASONING_EFFORT_OPTIONS.includes(v)) {
-    throw new Error(`思考强度只能是 ${REASONING_EFFORT_OPTIONS.join(' / ')}`);
+  if (!options.includes(v)) {
+    throw new Error(`思考强度只能是 ${options.join(' / ')}`);
   }
   return v;
 }
@@ -653,6 +665,11 @@ function loadConfig() {
   const file = readJsonSafe(p, null, true);
   if (!file || typeof file !== 'object' || Array.isArray(file)) throw new Error(`配置格式错误：${p}`);
   const cfg = {
+    backend: file.backend || 'dsh',
+    codex: file.codex || {},
+    botId: file.botId || 'default',
+    accountId: String(file.accountId || ''),
+    multiBot: file.multiBot || null,
     dsh: {
       baseUrl: 'http://127.0.0.1:3080',
       provider: 'deepseek-official',
@@ -980,15 +997,15 @@ function loadConfig() {
   // 离线铸造会话 Cookie（见 dsh-client 的 mintBrowserSessionCookie）。
   // authTokenExplicit 记录「token 是用户填的还是这里猜的」，客户端据此排优先级。
   cfg.dsh.authTokenExplicit = Boolean(cfg.dsh.authToken);
-  if (!cfg.dsh.authToken) cfg.dsh.authToken = discoverDshLaunchToken();
+  if (cfg.backend !== 'codex' && !cfg.dsh.authToken) cfg.dsh.authToken = discoverDshLaunchToken();
 
   // 思考强度可能被手工改成非法值（config.json 是用户可编辑的）。DeepSeek 适配器对非法值
   // 会硬拒绝，若直接透传会让每个会话的 selectModel 每次都失败；这里统一规范化并告警。
   try {
-    cfg.dsh.reasoningEffort = normalizeReasoningEffort(cfg.dsh.reasoningEffort ?? REASONING_EFFORT_DEFAULT);
+    cfg.dsh.reasoningEffort = normalizeReasoningEffort(cfg.dsh.reasoningEffort ?? (cfg.backend === 'codex' ? 'medium' : REASONING_EFFORT_DEFAULT), cfg.backend);
   } catch (error) {
     log(`⚠️ config.json 的 dsh.reasoningEffort「${cfg.dsh.reasoningEffort}」非法，已回退 ${REASONING_EFFORT_DEFAULT}（${error?.message ?? error}）`);
-    cfg.dsh.reasoningEffort = REASONING_EFFORT_DEFAULT;
+    cfg.dsh.reasoningEffort = cfg.backend === 'codex' ? 'medium' : REASONING_EFFORT_DEFAULT;
   }
 
   // 人格卡注入上限（字符）。历史硬编码 6000，现在可配：每条约 4~6k token 的成本护栏。
@@ -2326,7 +2343,10 @@ async function main() {
   }
 
   // DSH 侧
-  const api = new NodeApiClient(cfg.dsh.baseUrl, undefined, {
+  if (!['dsh', 'codex'].includes(cfg.backend)) throw new Error('Unknown AI backend');
+  const api = cfg.backend === 'codex'
+    ? new CodexClient({ root: ROOT, codeRoot: CODE_ROOT, config: cfg.codex })
+    : new NodeApiClient(cfg.dsh.baseUrl, undefined, {
     token: cfg.dsh.authToken,
     // true=用户在 config.json 里显式填的；false=从日志猜的。猜来的不优先于离线铸造。
     tokenExplicit: cfg.dsh.authTokenExplicit === true,
@@ -2335,6 +2355,10 @@ async function main() {
     // 默认只允许把 launch token 交给回环地址；远程 DSH 需要显式 opt-in（见 dsh-client.ensureAuth）。
     allowRemote: cfg.dsh.allowRemote === true
   });
+  if (cfg.backend === 'codex') {
+    const shutdown = () => { api.close().finally(() => process.exit(0)); };
+    process.once('SIGTERM', shutdown); process.once('SIGINT', shutdown);
+  }
   // DSH 的模型目录 RPC：0.1.5 是 `session/modelCatalog`。**不能走基类门面**
   // `api.sessions.modelCatalog` —— 桥接钉住的 `@deepseek-ai/dsh-host-apiproxy@0.1.1-rc.2`
   // 的 sessions 门面里根本没有这个方法（只有 `models` → 已下线的 `session/models`），
@@ -3398,6 +3422,8 @@ async function main() {
             role: rs.role ?? null,
             roleMode: rs.mode ?? 'active',
             dshReady,
+            backend: cfg.backend,
+            botId: cfg.botId,
             ownerQQ: cfg.ownerQQ ?? null,
             allowGroups: cfg.allow?.groups ?? [],
             allowPrivate: cfg.allow?.private ?? [],
@@ -3648,10 +3674,7 @@ async function main() {
             // 同步到 DSH 实际读取的安装目录。
             // 注意：安装副本**不做仓库内备份**——它的内容与刚写好的源文件一致，
             // 备份它等于把含本机绝对路径的快照塞进仓库工作区，没有额外价值。
-            const installed = installedPresetYaml(preset);
-            if (fs.existsSync(installed)) {
-              fs.copyFileSync(presetSourceYaml(preset), installed);
-            }
+            syncPresetCopy(presetStorageOptions(preset));
           } catch (error) {
             // 尽力回滚源文件，避免留下半截状态
             if (sourceBackup && fs.existsSync(sourceBackup)) {
@@ -3705,8 +3728,7 @@ async function main() {
             }
             backupPresetFile(preset);
             atomicWriteText(presetSourceYaml(preset), restored);
-            const installed = installedPresetYaml(preset);
-            if (fs.existsSync(installed)) fs.copyFileSync(presetSourceYaml(preset), installed);
+            syncPresetCopy(presetStorageOptions(preset));
             log(`控制台：${preset} 仿真提示词已还原自备份 ${target}；需重启 DSH 生效`);
             sendJson({ ok: true, restoredFrom: target, requiresRestart: true });
           } catch (error) {
@@ -4041,7 +4063,7 @@ async function main() {
           const provider = String(cfg.dsh?.provider || 'deepseek-official');
           const model = String(cfg.dsh?.model || 'deepseek-flash');
           // 档位优先取 DSH 实际公布的能力（DSH 换档位词汇或换 provider 时自动跟随），失败退回内置白名单。
-          let options = REASONING_EFFORT_OPTIONS.slice();
+          let options = (cfg.backend === 'codex' ? CODEX_EFFORT_OPTIONS : REASONING_EFFORT_OPTIONS).slice();
           let labels = {};
           let providerDefault = null;
           let catalogSource = 'fallback';
@@ -4054,7 +4076,7 @@ async function main() {
             const group = (catalog?.groups ?? []).find((g) => g?.id === provider);
             const entry = (group?.models ?? []).find((m) => m?.id === model);
             const efforts = entry?.reasoning?.efforts ?? [];
-            const advertised = efforts.map((e) => String(e?.id ?? '')).filter((id) => REASONING_EFFORT_OPTIONS.includes(id));
+            const advertised = efforts.map((e) => String(e?.id ?? '')).filter((id) => options.includes(id));
             if (advertised.length) {
               options = advertised;
               labels = Object.fromEntries(efforts.map((e) => [String(e.id), { name: e.name ?? '', description: e.description ?? '' }]));
@@ -4075,19 +4097,19 @@ async function main() {
             reasoningEffort: String(cfg.dsh?.reasoningEffort || REASONING_EFFORT_DEFAULT),
             options,
             labels,
-            default: REASONING_EFFORT_DEFAULT,
+            default: cfg.backend === 'codex' ? 'medium' : REASONING_EFFORT_DEFAULT,
             providerDefault,
             catalogSource,
             // selectModel 会同时写会话级与 DSH 全局默认（~/.dsh/settings.yaml 的 agent-default-model），
             // 控制台要把这点明确告诉管理员，避免「只想调 QQ 助手却改了 Web GUI 新会话默认」的意外。
-            globalSideEffect: true,
+            globalSideEffect: cfg.backend !== 'codex',
           });
           return;
         }
         if (req.method === 'POST' && url.pathname === '/api/dsh/effort') {
           const body = await readBody();
           let effort;
-          try { effort = normalizeReasoningEffort(body.reasoningEffort); }
+          try { effort = normalizeReasoningEffort(body.reasoningEffort, cfg.backend); }
           catch (error) { sendJson({ ok: false, error: error?.message ?? '思考强度无效' }, 400); return; }
           const configFile = path.join(ROOT, 'config.json');
           // fail-fast：配置损坏时直接 500，绝不回写（与白名单接口同语义）
@@ -4626,6 +4648,7 @@ async function main() {
             reply: 'qq_reply',
             sendBurst: 'qq_send_burst',
             sendMessage: 'qq_send_message',
+            ...(cfg.backend === 'codex' ? {sendGeneratedImage:'qq_send_generated_image'} : {}),
             waitMessages: 'qq_wait_for_messages',
             feedback: 'qq_report_feedback',
             getMyRecent: 'qq_get_my_recent_messages',
@@ -5680,6 +5703,62 @@ async function main() {
           return;
         }
 
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/send-generated-image') {
+          const body = await readBody();
+          const key = String(body.key ?? '').trim();
+          const token = req.headers['x-agent-token'];
+          if (cfg.backend !== 'codex' || currentMode !== 'reserved2' || !token || !agentTokenOk(key, token)
+              || !v2SessionAllowed(key) || !v2ToolEnabled('sendGeneratedImage') || socialV2.paused || shouldBlockSilentReply(key)) {
+            sendJson({ok:false,error:'生成图片发送未获当前会话授权或已暂停'},403); return;
+          }
+          const st = getSocialV2State(key);
+          const sessionId = state.sessions[key];
+          const sendCfg = cfg.socialV2?.send ?? {};
+          const now = Date.now();
+          const assertAllowed = captureSendGuard(key);
+          const guard = () => {
+            assertAllowed();
+            if (socialV2.paused || !agentTokenOk(key, token) || !v2ToolEnabled('sendGeneratedImage') || shouldBlockSilentReply(key))
+              throw Error('IMAGE_SEND_CANCELLED');
+          };
+          try {
+            const image = readGeneratedImage({home:path.resolve(ROOT,cfg.codex?.home || 'state/codex-home'),sessionId,filePath:body.filePath});
+            // All outbound media and text share the queue; recheck gates and quota at dispatch.
+            const job = sendChain.then(async () => {
+              guard();
+              const at = Date.now();
+              if ((sendCfg.maxSendPerMinute > 0 && st.sendTimes.filter(t=>at-t<60000).length >= sendCfg.maxSendPerMinute)
+                  || (sendCfg.maxSendPerHour > 0 && st.sendTimes.filter(t=>at-t<3600000).length >= sendCfg.maxSendPerHour))
+                throw Error('IMAGE_SEND_RATE_LIMIT');
+              const sent = await deliverGeneratedImage({image,key,sessionId,guard,
+                receiptFile:path.join(STATE_DIR,'generated-image-sends.json'),
+                httpUrl:String(cfg.snowluma?.httpUrl || 'http://127.0.0.1:3000'),accessToken:cfg.snowluma?.accessToken});
+              if (!sent.duplicate) {
+                st.sendTimes.push(at);
+                st.recentMessages.push({messageId:sent.messageId,sender:'我',text:'[图片：AI生成]',plain:'[图片：AI生成]',
+                  isSelf:true,time:at,hasMedia:true,media:[{kind:'image',summary:'AI生成图片'}]});
+                const limit = Number(cfg.socialV2?.context?.recentLimit) || 100;
+                if(st.recentMessages.length>limit)st.recentMessages.splice(0,st.recentMessages.length-limit);
+                st.lastAiReplyAt=at;st.lastActionAt=at;st.wakeConfig.noActionCount=0;
+                st.preSleepWaitSatisfiedAt=0;st.preSleepWaitObservedAt=0;st.preSleepWaitAccumMs=0;
+                saveSocialV2State();scheduleReplyCheckV2(key);
+                log(`[generated-image] 发送成功 ${key} messageId=${sent.messageId}`);
+                appendActivity(`${key} [generated-image] 已发送生成图片`);
+              }
+              return sent;
+            });
+            sendChain=job.then(()=>{},()=>{});
+            const sent=await job;
+            sendJson({ok:true,key,sent:sent.duplicate?0:1,duplicate:!!sent.duplicate,messageId:sent.messageId,bytes:sent.bytes});
+          } catch(error) {
+            const reason=String(error?.message || 'IMAGE_SEND_FAILED');
+            // No local paths or gateway credentials in model-visible errors.
+            const code=/^(GENERATED_IMAGE_[A-Z_]+|IMAGE_[A-Z_]+)/.exec(reason)?.[1] || 'IMAGE_SEND_FAILED';
+            log(`[generated-image] 发送未完成 ${key}: ${code}`);
+            sendJson({ok:false,error:code},400);
+          }
+          return;
+        }
         if (req.method === 'POST' && url.pathname === '/api/socialV2/send-sticker') {
           if (!stickerEnabled()) { sendJson({ ok: false, error: '表情包体系已关闭' }, 403); return; }
           const body = await readBody();
@@ -10515,6 +10594,20 @@ async function main() {
 
   // QQ 消息 → DSH prompt
   async function handleIncoming(kind, id, event, cfg) {
+    if (cfg.accountId && String(event.self_id ?? '') !== cfg.accountId) {
+      log('忽略来自非绑定 QQ 账号的消息'); return;
+    }
+    if (cfg.multiBot?.managerUrl) {
+      try {
+        const response = await fetch(`${cfg.multiBot.managerUrl}/internal/observe`, {
+          method: 'POST', headers: {'content-type':'application/json','x-manager-token':cfg.multiBot.managerToken},
+          body: JSON.stringify({botId:cfg.botId, groupId:`${kind}:${id}`, messageId:event.message_id,
+            senderId:String(event.user_id ?? event.sender?.user_id ?? '')}), signal:AbortSignal.timeout(3000)
+        });
+        if (!response.ok || !(await response.json()).allow) return;
+      } catch { log('多机器人协调器未响应，本条消息暂不触发回复'); return; }
+    }
+
     const key = convKey(kind, id);
     if (!modeAllowed(key, kind, id, cfg, currentMode)) {
       log(`忽略未授权会话 ${key}（当前模式 ${currentMode}，来自 ${event.user_id}）`);
@@ -11514,7 +11607,7 @@ async function main() {
   // QQ 侧（SnowLuma OneBot WebSocket 客户端）
   const bot = new SnowLumaWebSocketClient({
     url: cfg.snowluma.wsUrl,
-    accessToken: cfg.snowluma.accessToken || undefined,
+    accessToken: cfg.snowluma.wsAccessToken || cfg.snowluma.accessToken || undefined,
     reconnect: true
   });
 
@@ -11615,7 +11708,7 @@ async function main() {
    */
   async function applyHealedTokens(r) {
     const httpToken = r.token;
-    const wsToken = r.wsToken || r.token;
+    const wsToken = cfg.snowluma.wsAccessToken || r.wsToken || r.token;
     // ⚠️ 端点跟随是可关的（`snowluma.followDiscoveredEndpoint: false`），默认保持原行为。
     //
     // 为什么需要这个开关：自愈会拿 `discoverSnowLumaConnection()` **发现到的** wsUrl

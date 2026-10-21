@@ -169,6 +169,11 @@ const SAFE_PREFIXES = [
 // 无害模型侧工具：ask_user_question 用于把问题转给管理员/用户，
 // todo_write 仅维护任务列表。若后续 preset 不再挂载这些工具，保留无害。
 const SAFE_EXACT = new Set([
+  // Explicit read-only social-reader tool allowlist.
+  'mcp__social-reader__social_search',
+  'mcp__social-reader__social_read',
+  'mcp__social-reader__social_comments',
+  'mcp__social-reader__social_status',
   'ask_user_question',
   'todo_write',
 ])

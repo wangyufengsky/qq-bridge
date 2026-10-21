@@ -10,6 +10,7 @@ import net from 'node:net';
 import http from 'node:http';
 import https from 'node:https';
 import { StringDecoder } from 'node:string_decoder';
+import { resolvePublicDns } from './public-dns.js';
 
 const dnsLookup = dns.promises.lookup;
 
@@ -132,6 +133,22 @@ function orderAddresses(addresses) {
   return ordered;
 }
 
+// Clash / Mihomo 等代理的 fake-IP 模式会把域名解析到 198.18.0.0/15（RFC 2544 基准测试保留段）。
+// QQ 的图片/表情 CDN 在这种环境下只有走 fake-IP 才能被 TUN 接管并连上真实节点。
+// 这里只对明确的腾讯/QQ 媒体域名放行这一段地址：其它私网/环回/链路本地地址仍然一律拒绝，
+// 也不会因为「域名是 qq.com」就允许它解析到 10/172.16/192.168 等真正的内网段。
+const FAKE_IP_ALLOWED_SUFFIXES = ['qq.com', 'qq.com.cn', 'qpic.cn', 'gtimg.cn'];
+
+function isFakeIpRange(ip) {
+  const m = /^(\d+)\.(\d+)\./.exec(String(ip || ''));
+  return Boolean(m) && Number(m[1]) === 198 && (Number(m[2]) === 18 || Number(m[2]) === 19);
+}
+
+function isFakeIpAllowedHost(hostname) {
+  const h = String(hostname || '').toLowerCase();
+  return FAKE_IP_ALLOWED_SUFFIXES.some((suffix) => h === suffix || h.endsWith(`.${suffix}`));
+}
+
 /** 解析主机名并校验**全部**解析结果，返回可尝试的地址列表（IPv4 优先）。 */
 export async function resolveSafeAddresses(hostname) {
   const h = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
@@ -150,8 +167,28 @@ export async function resolveSafeAddresses(hostname) {
     throw new Error(`域名解析失败：${error?.message ?? error}`);
   }
   if (!addresses.length) throw new Error('域名没有解析结果');
+  const allowFakeIp = isFakeIpAllowedHost(h);
+  // Reject genuine private addresses before considering a proxy DNS fallback.
+  // A mixed private/Fake-IP answer must never become a route around the guard.
+  for (const { address } of addresses) {
+    if (isPrivateIp(address) && !isFakeIpRange(address)) {
+      throw new Error('域名解析到内网/本机地址，已阻止');
+    }
+  }
+  if (!allowFakeIp && addresses.some(({ address }) => isFakeIpRange(address))) {
+    try {
+      addresses = await resolvePublicDns(h);
+    } catch (error) {
+      throw new Error(`检测到代理 Fake-IP，公网 DNS 解析失败：${error.message}`);
+    }
+    // The HTTPS DNS answer is still untrusted input: validate every address.
+    if (addresses.some(({ address }) => isPrivateIp(address))) {
+      throw new Error('公网 DNS 解析到非公网地址，已阻止');
+    }
+  }
   for (const { address } of addresses) {
     if (isPrivateIp(address)) {
+      if (allowFakeIp && isFakeIpRange(address)) continue;
       throw new Error('域名解析到内网/本机地址，已阻止');
     }
   }

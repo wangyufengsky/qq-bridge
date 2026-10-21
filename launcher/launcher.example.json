@@ -1,0 +1,8 @@
+{
+  "fishRoot": "../../qq-bridge-deepseek",
+  "dualRoot": "..",
+  "containers": [
+    "snowluma",
+    "qq-bridge-dual-qq-codex-1"
+  ]
+}

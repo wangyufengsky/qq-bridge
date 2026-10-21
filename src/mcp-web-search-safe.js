@@ -29,6 +29,7 @@ import { z } from 'zod';
  * 取它的上一级 `src/` 的父目录即可。取不到时退回 cwd（测试环境正好从仓库根运行）。
  */
 function projectRoot() {
+  if (process.env.QQ_BRIDGE_INSTANCE_DIR) return path.resolve(process.env.QQ_BRIDGE_INSTANCE_DIR);
   try {
     const entry = String(process.argv[1] ?? '');
     if (entry) {

@@ -202,6 +202,15 @@ if (!files.length) {
 const allowRe = rules.allowPaths.map((p) => (p.includes('*') ? globToRe(p) : new RegExp(`^${p.replace(/[.+^${}()|[\]\\]/g, '\\$&')}`)));
 const denyFileRes = rules.denyFiles.map((p) => ({ glob: p, re: globToRe(p) }));
 
+// Exact synthetic fixtures only; never exempt an entire new test directory.
+// The first two URLs exercise credential rejection; the third value is the
+// base64 header/data of the one-pixel PNG used by generated-image tests.
+const publicFixtures = [
+  ['packages/social-reader/test/reader.test.mjs', '带凭据的 URL', 'https://a:b@'],
+  ['packages/social-reader/test/reader.test.mjs', '带凭据的 URL', 'https://user:secret@'],
+  ['test/dual/generated-image.test.mjs', '疑似令牌/密钥（高熵串）',
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8'],
+];
 const findings = [];
 for (const rel of files) {
   const normalized = rel.split(path.sep).join('/');
@@ -219,7 +228,7 @@ for (const rel of files) {
   // ② 内容级：一个文件里同一规则最多报 3 处（带行号），方便直接定位；不要把整文件刷屏。
   for (const rule of rules.deny) {
     let re;
-    try { re = new RegExp(rule.pattern, rule.flags ?? 'g'); }
+    try { re = new RegExp(rule.pattern, [...new Set((rule.flags ?? '') + 'g')].join('')); }
     catch (error) { console.error(`[privacy-scan] 规则「${rule.name}」正则非法：${error.message}`); continue; }
     re.lastIndex = 0;
     let m;
@@ -234,6 +243,7 @@ for (const rel of files) {
       const value = m[0];
       if (m.index === re.lastIndex) re.lastIndex += 1; // 空匹配保护
       if (isNoise(value, rule)) continue;
+      if (publicFixtures.some(([file, name, literal]) => file === normalized && name === rule.name && literal === value)) continue;
       hits += 1;
       const line = text.slice(0, m.index).split('\n').length;
       findings.push({ kind: 'content', rule: rule.name, file: normalized, line, masked: mask(value) });

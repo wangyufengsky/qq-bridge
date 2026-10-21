@@ -1,4 +1,6 @@
-# QQ ↔ DeepSeek Harness 桥接
+# QQ ↔ DeepSeek Harness / Codex 桥接
+
+> 本分支正在开发双 AI 版本：独立 QQ 账号、Codex app-server 适配和统一管理入口。启动方式、已验证范围与待联调项目见 [双 AI 开发指南](docs/guides/DUAL-AI.md)。
 
 **English**: [README.en.md](README.en.md) | **中文**: [README.md](README.md)
 
@@ -359,3 +361,13 @@ SnowLuma 同一个账号的 **HTTP token（默认 3000 端口）与 WebSocket to
 ## 合规提醒
 
 SnowLuma 是独立第三方项目，与腾讯/QQ 无隶属关系，仅供学习与技术研究；使用前请阅读其 EULA 与《QQ 用户协议》。
+
+## 双 AI 分支入口
+
+本分支包含 DeepSeek / Codex 双后端、多账号管理台、平台读取器和 Codex 生成图片回传。
+
+- [双 AI 部署与验证](docs/guides/DUAL-AI.md)
+- [macOS 统一启动 / 停止入口](launcher/README.md)
+- [大肥鱼与大肥龙人格模板](personas/README.md)
+
+仓库只包含代码、配置示例和脱敏人格。实际 `config.json`、`multi-bot.json`、实例状态、登录凭据和聊天记录留在本机。
